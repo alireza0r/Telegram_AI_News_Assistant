@@ -2,362 +2,211 @@ import sqlite3
 import feedparser
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Callable, Any
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class NewsManager:
-    def __init__(self, db_path: str = "news_database.db"):
-        """Initialize the news manager with database connection."""
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
-        self.cursor = self.conn.cursor()
-        self._create_tables()
-        self._setup_logging()
-
-    def _setup_logging(self):
-        """Setup logging configuration."""
-        logging.basicConfig(
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            level=logging.INFO
-        )
+    def __init__(self):
+        """Initialize the News Manager."""
         self.logger = logging.getLogger(__name__)
-
-    def _create_tables(self):
-        """Create database tables if they don't exist."""
-        with open('schema.sql', 'r') as f:
-            schema = f.read()
-        self.cursor.executescript(schema)
-        self.conn.commit()
-
-    # User Management
-    def add_user(self, user_id: str, username: str) -> int:
-        """Add a new user to the database."""
-        try:
-            self.cursor.execute(
-                "INSERT INTO users (username, email) VALUES (?, ?)",
-                (username, user_id)
-            )
-            self.conn.commit()
-            
-            # Initialize schedule
-            self.cursor.execute(
-                "INSERT INTO user_schedule (user_id, enabled, interval_minutes) VALUES (?, FALSE, 60)",
-                (user_id,)
-            )
-            self.conn.commit()
-            
-            return self.cursor.lastrowid
-        except sqlite3.IntegrityError:
-            self.logger.info(f"User {user_id} already exists")
-            return -1
-
-    def remove_user(self, user_id: str) -> bool:
-        """Remove a user and all their data."""
-        try:
-            # Remove user's subscriptions
-            self.cursor.execute("DELETE FROM user_feeds WHERE user_id = ?", (user_id,))
-            # Remove user's delivery records
-            self.cursor.execute("DELETE FROM news_delivery WHERE user_id = ?", (user_id,))
-            # Remove user's schedule
-            self.cursor.execute("DELETE FROM user_schedule WHERE user_id = ?", (user_id,))
-            # Remove user
-            self.cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error removing user {user_id}: {e}")
-            return False
-
-    # Feed Management
-    def add_feed(self, feed_url: str, feed_name: str) -> int:
-        """Add a new RSS feed to the database."""
-        try:
-            self.cursor.execute(
-                "INSERT INTO rss_feeds (feed_url, feed_name) VALUES (?, ?)",
-                (feed_url, feed_name)
-            )
-            self.conn.commit()
-            return self.cursor.lastrowid
-        except sqlite3.IntegrityError:
-            self.logger.info(f"Feed {feed_url} already exists")
-            return -1
-
-    def subscribe_user_to_feed(self, user_id: str, feed_id: int) -> bool:
-        """Subscribe a user to an RSS feed."""
-        try:
-            self.cursor.execute(
-                "INSERT INTO user_feeds (user_id, feed_id) VALUES (?, ?)",
-                (user_id, feed_id)
-            )
-            self.conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            self.logger.info(f"User {user_id} already subscribed to feed {feed_id}")
-            return False
-
-    def unsubscribe_user_from_feed(self, user_id: str, feed_id: int) -> bool:
-        """Unsubscribe a user from an RSS feed."""
-        try:
-            self.cursor.execute(
-                "DELETE FROM user_feeds WHERE user_id = ? AND feed_id = ?",
-                (user_id, feed_id)
-            )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error unsubscribing user {user_id} from feed {feed_id}: {e}")
-            return False
-
-    # Schedule Management
-    def set_schedule(self, user_id: str, interval_minutes: int) -> bool:
-        """Set the automatic news delivery interval for a user."""
-        try:
-            self.cursor.execute(
-                "UPDATE user_schedule SET interval_minutes = ? WHERE user_id = ?",
-                (interval_minutes, user_id)
-            )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error setting schedule for user {user_id}: {e}")
-            return False
-
-    def enable_auto_delivery(self, user_id: str) -> bool:
-        """Enable automatic news delivery for a user."""
-        try:
-            self.cursor.execute(
-                "UPDATE user_schedule SET enabled = TRUE WHERE user_id = ?",
-                (user_id,)
-            )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error enabling auto delivery for user {user_id}: {e}")
-            return False
-
-    def disable_auto_delivery(self, user_id: str) -> bool:
-        """Disable automatic news delivery for a user."""
-        try:
-            self.cursor.execute(
-                "UPDATE user_schedule SET enabled = FALSE WHERE user_id = ?",
-                (user_id,)
-            )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error disabling auto delivery for user {user_id}: {e}")
-            return False
-
-    def get_user_schedule(self, user_id: str) -> Optional[Dict]:
-        """Get a user's schedule settings."""
-        try:
-            self.cursor.execute(
-                "SELECT enabled, interval_minutes, last_delivery FROM user_schedule WHERE user_id = ?",
-                (user_id,)
-            )
-            result = self.cursor.fetchone()
-            if result:
-                return {
-                    'enabled': bool(result[0]),
-                    'interval_minutes': result[1],
-                    'last_delivery': result[2]
-                }
-            return None
-        except Exception as e:
-            self.logger.error(f"Error getting schedule for user {user_id}: {e}")
-            return None
-
-    # News Management
-    def check_feeds(self) -> List[Dict]:
-        """Check all feeds for new content."""
-        new_items = []
-        try:
-            self.cursor.execute("SELECT feed_id, feed_url FROM rss_feeds")
-            feeds = self.cursor.fetchall()
-            
-            for feed_id, feed_url in feeds:
-                try:
-                    feed = feedparser.parse(feed_url)
-                    if not feed.entries:
-                        continue
-                    
-                    for entry in feed.entries:
-                        self.cursor.execute(
-                            "SELECT news_id FROM news_items WHERE link = ?",
-                            (entry.link,)
-                        )
-                        if not self.cursor.fetchone():
-                            news_id = self.add_news_item(
-                                feed_id,
-                                entry.title,
-                                entry.link,
-                                entry.description if hasattr(entry, 'description') else '',
-                                datetime.now()
-                            )
-                            new_items.append({
-                                'news_id': news_id,
-                                'feed_id': feed_id,
-                                'title': entry.title,
-                                'link': entry.link,
-                                'description': entry.description if hasattr(entry, 'description') else ''
-                            })
-                    
-                    self.update_feed_last_updated(feed_id)
-                    
-                except Exception as e:
-                    self.logger.error(f"Error checking feed {feed_id}: {e}")
-            
-        except Exception as e:
-            self.logger.error(f"Error in check_feeds: {e}")
+        self.logger.info("Initializing News Manager")
         
-        return new_items
-
-    def add_news_item(self, feed_id: int, title: str, link: str, description: str, pub_date: datetime) -> int:
-        """Add a new news item to the database."""
-        try:
-            self.cursor.execute(
-                """INSERT INTO news_items 
-                   (feed_id, title, link, description, pub_date) 
-                   VALUES (?, ?, ?, ?, ?)""",
-                (feed_id, title, link, description, pub_date)
+        # Initialize database
+        self.db_path = 'news_bot.db'
+        self._init_db()
+        
+    def _init_db(self):
+        """Initialize the SQLite database."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # Create users table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                language TEXT DEFAULT 'en',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            self.conn.commit()
-            return self.cursor.lastrowid
-        except Exception as e:
-            self.logger.error(f"Error adding news item: {e}")
-            return -1
-
-    def get_undelivered_news(self, user_id: str) -> List[Dict]:
-        """Get all undelivered news items for a user."""
-        try:
-            self.cursor.execute("""
-                SELECT ni.news_id, ni.title, ni.link, ni.description, ni.pub_date, rf.feed_name
-                FROM news_items ni
-                JOIN rss_feeds rf ON ni.feed_id = rf.feed_id
-                JOIN user_feeds uf ON rf.feed_id = uf.feed_id
-                LEFT JOIN news_delivery nd ON ni.news_id = nd.news_id AND nd.user_id = ?
-                WHERE uf.user_id = ? AND nd.delivery_id IS NULL
-                ORDER BY ni.pub_date DESC
-            """, (user_id, user_id))
-            
-            columns = [description[0] for description in self.cursor.description]
-            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
-        except Exception as e:
-            self.logger.error(f"Error getting undelivered news for user {user_id}: {e}")
-            return []
-
-    def mark_news_delivered(self, user_id: str, news_id: int) -> bool:
-        """Mark a news item as delivered to a user."""
-        try:
-            self.cursor.execute(
-                "INSERT INTO news_delivery (user_id, news_id) VALUES (?, ?)",
-                (user_id, news_id)
+        ''')
+        
+        # Create feeds table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS feeds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                feed_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error marking news {news_id} as delivered to user {user_id}: {e}")
-            return False
-
-    def get_user_feeds(self, user_id: str) -> List[Dict]:
-        """Get all RSS feeds a user is subscribed to."""
-        try:
-            self.cursor.execute("""
-                SELECT rf.feed_id, rf.feed_url, rf.feed_name, rf.last_updated
-                FROM rss_feeds rf
-                JOIN user_feeds uf ON rf.feed_id = uf.feed_id
-                WHERE uf.user_id = ?
-            """, (user_id,))
-            
-            columns = [description[0] for description in self.cursor.description]
-            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
-        except Exception as e:
-            self.logger.error(f"Error getting feeds for user {user_id}: {e}")
-            return []
-
-    def update_feed_last_updated(self, feed_id: int) -> bool:
-        """Update the last_updated timestamp for a feed."""
-        try:
-            self.cursor.execute(
-                "UPDATE rss_feeds SET last_updated = CURRENT_TIMESTAMP WHERE feed_id = ?",
-                (feed_id,)
+        ''')
+        
+        # Create settings table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                user_id TEXT PRIMARY KEY,
+                language TEXT DEFAULT 'en',
+                schedule TEXT DEFAULT '24h',
+                summarize BOOLEAN DEFAULT 1,
+                translate BOOLEAN DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
-            self.conn.commit()
-            return True
-        except Exception as e:
-            self.logger.error(f"Error updating feed {feed_id} timestamp: {e}")
-            return False
-
-    def get_users_for_delivery(self) -> List[Dict]:
-        """Get all users who should receive news based on their schedule."""
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+    def add_user(self, user_id: str, username: str):
+        """Add a new user to the database."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
         try:
-            self.cursor.execute("""
-                SELECT us.user_id, us.interval_minutes, us.last_delivery, us.enabled
-                FROM user_schedule us
-                WHERE us.enabled = TRUE
-            """)
-            
-            users = []
-            for user_id, interval, last_delivery, enabled in self.cursor.fetchall():
-                self.logger.info(f"Checking user {user_id}: interval={interval}min, last_delivery={last_delivery}, enabled={enabled}")
-                
-                if last_delivery:
-                    last_delivery = datetime.fromisoformat(last_delivery)
-                    next_delivery = last_delivery + timedelta(minutes=interval)
-                    self.logger.info(f"Next delivery for user {user_id} should be at {next_delivery}")
-                    if datetime.now() < next_delivery:
-                        self.logger.info(f"Skipping user {user_id} - next delivery not due yet")
-                        continue
-                
-                users.append({
-                    'user_id': user_id,
-                    'interval_minutes': interval,
-                    'last_delivery': last_delivery
-                })
-                self.logger.info(f"Added user {user_id} to delivery list")
-            
-            self.logger.info(f"Found {len(users)} users eligible for delivery")
-            return users
-        except Exception as e:
-            self.logger.error(f"Error getting users for delivery: {e}")
-            return []
-
-    def update_last_delivery(self, user_id: str) -> bool:
-        """Update the last delivery timestamp for a user."""
-        try:
-            self.cursor.execute(
-                "UPDATE user_schedule SET last_delivery = CURRENT_TIMESTAMP WHERE user_id = ?",
+            c.execute(
+                "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
+                (user_id, username)
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO settings (user_id) VALUES (?)",
                 (user_id,)
             )
-            self.conn.commit()
-            return True
+            conn.commit()
         except Exception as e:
-            self.logger.error(f"Error updating last delivery for user {user_id}: {e}")
-            return False
-
-    def get_news_by_id(self, news_id: int) -> Optional[Dict]:
-        """Get news item by ID."""
+            self.logger.error(f"Error adding user: {str(e)}")
+            raise
+        finally:
+            conn.close()
+            
+    def add_feed(self, user_id: str, feed_url: str):
+        """Add a new RSS feed for a user."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
         try:
-            self.cursor.execute("""
-                SELECT title, description, link, language
-                FROM news_items
-                WHERE news_id = ?
-            """, (news_id,))
-            
-            result = self.cursor.fetchone()
-            if not result:
-                return None
+            # Verify feed URL
+            feed = feedparser.parse(feed_url)
+            if not feed.entries:
+                raise ValueError("Invalid or empty RSS feed")
                 
-            return {
-                'title': result[0],
-                'description': result[1],
-                'link': result[2],
-                'language': result[3]
-            }
-            
+            c.execute(
+                "INSERT INTO feeds (user_id, feed_url) VALUES (?, ?)",
+                (user_id, feed_url)
+            )
+            conn.commit()
         except Exception as e:
-            self.logger.error(f"Error getting news {news_id}: {e}")
-            return None
-
-    def close(self):
-        """Close the database connection."""
-        self.conn.close() 
+            self.logger.error(f"Error adding feed: {str(e)}")
+            raise
+        finally:
+            conn.close()
+            
+    def remove_feed(self, user_id: str, feed_url: str):
+        """Remove a feed from a user's subscriptions."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            c.execute(
+                "DELETE FROM feeds WHERE user_id = ? AND feed_url = ?",
+                (user_id, feed_url)
+            )
+            if c.rowcount == 0:
+                raise ValueError("Feed not found in your subscriptions")
+            conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error removing feed: {str(e)}")
+            raise
+        finally:
+            conn.close()
+            
+    def get_feeds(self, user_id: str) -> list:
+        """Get all feeds for a user."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            c.execute(
+                "SELECT feed_url FROM feeds WHERE user_id = ?",
+                (user_id,)
+            )
+            feeds = [row[0] for row in c.fetchall()]
+            return feeds
+        finally:
+            conn.close()
+            
+    def get_settings(self, user_id: str) -> dict:
+        """Get user settings."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            c.execute(
+                "SELECT language, schedule, summarize, translate FROM settings WHERE user_id = ?",
+                (user_id,)
+            )
+            row = c.fetchone()
+            if row:
+                return {
+                    'Language': row[0],
+                    'Schedule': row[1],
+                    'Summarize': 'Enabled' if row[2] else 'Disabled',
+                    'Translate': 'Enabled' if row[3] else 'Disabled'
+                }
+            return {}
+        finally:
+            conn.close()
+            
+    def update_setting(self, user_id: str, setting: str, value: str):
+        """Update a user setting."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            if setting == 'language':
+                c.execute(
+                    "UPDATE settings SET language = ? WHERE user_id = ?",
+                    (value, user_id)
+                )
+            elif setting == 'schedule':
+                c.execute(
+                    "UPDATE settings SET schedule = ? WHERE user_id = ?",
+                    (value, user_id)
+                )
+            elif setting == 'summarize':
+                c.execute(
+                    "UPDATE settings SET summarize = ? WHERE user_id = ?",
+                    (1 if value == 'enable' else 0, user_id)
+                )
+            elif setting == 'translate':
+                c.execute(
+                    "UPDATE settings SET translate = ? WHERE user_id = ?",
+                    (1 if value == 'enable' else 0, user_id)
+                )
+            conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error updating setting: {str(e)}")
+            raise
+        finally:
+            conn.close()
+            
+    def get_latest_news(self, user_id: str) -> list:
+        """Get latest news from all subscribed feeds."""
+        feeds = self.get_feeds(user_id)
+        news_items = []
+        
+        for feed_url in feeds:
+            try:
+                feed = feedparser.parse(feed_url)
+                for entry in feed.entries[:5]:  # Get latest 5 entries
+                    news_items.append({
+                        'title': entry.title,
+                        'link': entry.link,
+                        'summary': entry.summary if hasattr(entry, 'summary') else '',
+                        'published': entry.published if hasattr(entry, 'published') else ''
+                    })
+            except Exception as e:
+                self.logger.error(f"Error parsing feed {feed_url}: {str(e)}")
+                
+        return news_items 
