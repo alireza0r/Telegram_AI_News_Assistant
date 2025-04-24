@@ -18,6 +18,8 @@ import re
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import langdetect
+import time
+from telegram.error import NetworkError, RetryAfter
 
 # Load environment variables
 load_dotenv()
@@ -393,6 +395,43 @@ async def get_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Delivered {len(news_items)} news items. Use /getnews again later for more updates."
     )
 
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Configure news delivery settings."""
+    user_id = str(update.effective_user.id)
+    preferences = news_manager.get_user_preferences(user_id)
+    
+    # Create keyboard for settings options
+    keyboard = [
+        [
+            InlineKeyboardButton("🌐 Language", callback_data="settings_language"),
+            InlineKeyboardButton("📝 Translation", callback_data="settings_translation")
+        ],
+        [
+            InlineKeyboardButton("📰 Max News Items", callback_data="settings_max_items"),
+            InlineKeyboardButton("⏰ Schedule", callback_data="settings_schedule")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Get current settings
+    schedule = news_manager.get_user_schedule(user_id)
+    translation_status = "Enabled" if preferences['enable_translation'] else "Disabled"
+    max_items = preferences['max_news_items']
+    
+    message = (
+        "⚙️ *News Settings*\n\n"
+        f"🌐 *Language:* {SUPPORTED_LANGUAGES.get(preferences['preferred_language'], 'English')}\n"
+        f"📝 *Translation:* {translation_status}\n"
+        f"📰 *Max News Items:* {max_items}\n"
+        f"⏰ *Schedule:* {'Enabled' if schedule and schedule['enabled'] else 'Disabled'}\n"
+        f"  • Interval: Every {schedule['interval_minutes'] if schedule else 60} minutes\n\n"
+        "Select an option to update your settings:"
+    )
+    
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    return SETTING_SCHEDULE
+
 # Callback query handler
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button callbacks."""
@@ -433,12 +472,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("lang_"):
         # Handle language selection
         language_code = data.split("_")[1]
-        set_user_language(user_id, language_code)
-        
-        await query.edit_message_text(
-            f"✅ Language set to {SUPPORTED_LANGUAGES[language_code]}.\n"
-            "Your news will now be translated to this language when needed."
-        )
+        if set_user_language(user_id, language_code):
+            await query.edit_message_text(
+                f"✅ Language set to {SUPPORTED_LANGUAGES[language_code]}.\n"
+                "Your news will now be translated to this language when needed."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to set language. Please try again."
+            )
         return CHOOSING_LANGUAGE
     
     elif data.startswith("schedule_"):
@@ -446,38 +488,152 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split("_")[1]
         
         if action == "enable":
-            news_manager.enable_auto_delivery(user_id)
-            await query.edit_message_text(
-                "✅ Automatic news delivery enabled.\n"
-                "You will receive news at your scheduled interval."
-            )
+            if news_manager.enable_auto_delivery(user_id):
+                await query.edit_message_text(
+                    "✅ Automatic news delivery enabled.\n"
+                    "You will receive news at your scheduled interval."
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to enable automatic delivery. Please try again."
+                )
         
         elif action == "disable":
-            news_manager.disable_auto_delivery(user_id)
-            await query.edit_message_text(
-                "⏸ Automatic news delivery disabled.\n"
-                "You can still get news manually with /getnews."
-            )
+            if news_manager.disable_auto_delivery(user_id):
+                await query.edit_message_text(
+                    "⏸ Automatic news delivery disabled.\n"
+                    "You can still get news manually with /getnews."
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to disable automatic delivery. Please try again."
+                )
         
         elif action.isdigit():
             interval = int(action)
-            news_manager.set_schedule(user_id, interval)
-            
-            if interval == 1440:
-                interval_text = "day"
-            elif interval == 60:
-                interval_text = "hour"
-            elif interval == 30:
-                interval_text = "30 minutes"
+            if news_manager.set_schedule(user_id, interval):
+                if interval == 1440:
+                    interval_text = "day"
+                elif interval == 60:
+                    interval_text = "hour"
+                elif interval == 30:
+                    interval_text = "30 minutes"
+                else:
+                    interval_text = f"{interval} minutes"
+                
+                await query.edit_message_text(
+                    f"⏰ Schedule updated. You will receive news every {interval_text}.\n"
+                    f"Make sure automatic delivery is enabled with /schedule."
+                )
             else:
-                interval_text = f"{interval} minutes"
-            
-            await query.edit_message_text(
-                f"⏰ Schedule updated. You will receive news every {interval_text}.\n"
-                f"Make sure automatic delivery is enabled with /schedule."
-            )
+                await query.edit_message_text(
+                    "❌ Failed to update schedule. Please try again."
+                )
         
         return SETTING_SCHEDULE
+    
+    elif data.startswith("settings_"):
+        # Handle settings options
+        setting = data.split("_")[1]
+        
+        if setting == "language":
+            keyboard = []
+            row = []
+            
+            # Create a button grid for languages
+            for i, (code, name) in enumerate(SUPPORTED_LANGUAGES.items(), 1):
+                row.append(InlineKeyboardButton(name, callback_data=f"lang_{code}"))
+                if i % 2 == 0:  # 2 buttons per row
+                    keyboard.append(row)
+                    row = []
+            
+            if row:  # Add any remaining buttons
+                keyboard.append(row)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "🌐 Select your preferred language for news:",
+                reply_markup=reply_markup
+            )
+            return CHOOSING_LANGUAGE
+        
+        elif setting == "translation":
+            preferences = news_manager.get_user_preferences(user_id)
+            new_preferences = preferences.copy()
+            new_preferences['enable_translation'] = not preferences['enable_translation']
+            
+            if news_manager.update_user_preferences(user_id, new_preferences):
+                status = "enabled" if new_preferences['enable_translation'] else "disabled"
+                await query.edit_message_text(
+                    f"✅ Translation {status}.\n"
+                    "Your news will now be translated when needed."
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to update translation settings. Please try again."
+                )
+        
+        elif setting == "max_items":
+            keyboard = [
+                [
+                    InlineKeyboardButton("3", callback_data="max_items_3"),
+                    InlineKeyboardButton("5", callback_data="max_items_5"),
+                    InlineKeyboardButton("10", callback_data="max_items_10")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "📰 Select maximum number of news items to receive at once:",
+                reply_markup=reply_markup
+            )
+        
+        elif setting == "schedule":
+            keyboard = [
+                [
+                    InlineKeyboardButton("Enable", callback_data="schedule_enable"),
+                    InlineKeyboardButton("Disable", callback_data="schedule_disable")
+                ],
+                [
+                    InlineKeyboardButton("Every 30 min", callback_data="schedule_30"),
+                    InlineKeyboardButton("Hourly", callback_data="schedule_60")
+                ],
+                [
+                    InlineKeyboardButton("Every 3 hours", callback_data="schedule_180"),
+                    InlineKeyboardButton("Daily", callback_data="schedule_1440")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            schedule = news_manager.get_user_schedule(user_id)
+            status = "Enabled" if schedule and schedule['enabled'] else "Disabled"
+            interval = schedule['interval_minutes'] if schedule else 60
+            
+            message = (
+                "⏰ *News Delivery Schedule*\n\n"
+                f"Current status: *{status}*\n"
+                f"Current interval: Every *{interval} minutes*\n\n"
+                "Select an option to update your schedule:"
+            )
+            
+            await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            return SETTING_SCHEDULE
+    
+    elif data.startswith("max_items_"):
+        max_items = int(data.split("_")[2])
+        preferences = news_manager.get_user_preferences(user_id)
+        preferences['max_news_items'] = max_items
+        
+        if news_manager.update_user_preferences(user_id, preferences):
+            await query.edit_message_text(
+                f"✅ Maximum news items set to {max_items}.\n"
+                "You will now receive up to this many items at once."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to update maximum news items. Please try again."
+            )
 
 # Helper functions
 def extract_feed_name(url: str) -> str:
@@ -512,29 +668,39 @@ def detect_language(text: str) -> str:
 
 def get_user_language(user_id: str) -> str:
     """Get user's preferred language from database."""
-    try:
-        # This is a stub - implement actual database storage in news_manager
-        # For now, we'll return English as default
-        return 'en'
-    except Exception as e:
-        logger.error(f"Error getting user language: {e}")
-        return 'en'
+    return news_manager.get_user_language(user_id)
 
 def set_user_language(user_id: str, language_code: str) -> bool:
     """Set user's preferred language in database."""
-    try:
-        # This is a stub - implement actual database storage in news_manager
-        # For now, we'll just log it
-        logger.info(f"Setting language for user {user_id} to {language_code}")
-        return True
-    except Exception as e:
-        logger.error(f"Error setting user language: {e}")
-        return False
+    return news_manager.set_user_language(user_id, language_code)
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors in the bot."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    if isinstance(context.error, NetworkError):
+        logger.warning("Network error occurred, will retry...")
+        await asyncio.sleep(5)  # Wait before retrying
+        return
+    
+    if isinstance(context.error, RetryAfter):
+        logger.warning(f"Rate limited, waiting {context.error.retry_after} seconds")
+        await asyncio.sleep(context.error.retry_after)
+        return
+    
+    # For other errors, try to notify the user
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "Sorry, an error occurred while processing your request. Please try again later."
+        )
 
 def main():
     """Start the bot."""
     # Create the Application and pass it your bot's token
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add error handler
+    application.add_error_handler(error_handler)
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
@@ -544,6 +710,7 @@ def main():
     application.add_handler(CommandHandler("listfeeds", list_feeds_command))
     application.add_handler(CommandHandler("removefeed", remove_feed_command))
     application.add_handler(CommandHandler("getnews", get_news_command))
+    application.add_handler(CommandHandler("settings", settings_command))
     
     # Add conversation handlers for interactive commands
     language_conv_handler = ConversationHandler(
@@ -567,8 +734,19 @@ def main():
     # Add general callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Start the Bot
-    application.run_polling()
+    # Start the Bot with retry logic
+    while True:
+        try:
+            logger.info("Starting bot...")
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+        except NetworkError as e:
+            logger.error(f"Network error: {e}")
+            logger.info("Retrying in 5 seconds...")
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            logger.info("Retrying in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == '__main__':
     main()

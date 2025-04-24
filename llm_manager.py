@@ -15,7 +15,7 @@ class LLMManager:
         """Initialize LLM manager with API credentials."""
         self.api_key = os.getenv('LLM_API_KEY')  # API key for the LLM service
         self.api_url = os.getenv('LLM_API_URL', 'https://api.openai.com/v1/chat/completions')
-        self.model = os.getenv('LLM_MODEL', 'gpt-4')
+        self.model = os.getenv('LLM_MODEL', 'gpt-3.5-mini')
         
         # Setup logging
         logging.basicConfig(

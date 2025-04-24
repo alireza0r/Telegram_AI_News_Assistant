@@ -54,4 +54,13 @@ CREATE TABLE IF NOT EXISTS user_schedule (
     interval_minutes INTEGER DEFAULT 60,
     last_delivery TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- User preferences table
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id INTEGER PRIMARY KEY,
+    preferred_language TEXT DEFAULT 'en',
+    enable_translation BOOLEAN DEFAULT TRUE,
+    max_news_items INTEGER DEFAULT 5,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ); 

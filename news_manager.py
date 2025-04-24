@@ -50,31 +50,43 @@ class NewsManager:
             if not email:
                 email = f"{user_id}@telegram.user"
             
-            self.cursor.execute(
-                "INSERT OR IGNORE INTO users (username, email) VALUES (?, ?)",
-                (username, email)
-            )
-            self.conn.commit()
-            
-            # Get the user_id (primary key) from database
+            # First check if user already exists
             self.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-            db_user_id = self.cursor.fetchone()[0]
+            existing_user = self.cursor.fetchone()
             
-            # Initialize user settings in user_schedule table
+            if existing_user:
+                db_user_id = existing_user[0]
+                self.logger.info(f"User {username} already exists with ID {db_user_id}")
+            else:
+                # Add new user
+                self.cursor.execute(
+                    "INSERT INTO users (username, email) VALUES (?, ?)",
+                    (username, email)
+                )
+                self.conn.commit()
+                db_user_id = self.cursor.lastrowid
+                self.logger.info(f"User {username} added successfully with ID {db_user_id}")
+            
+            # Initialize user settings in user_schedule table if not exists
             self.cursor.execute(
                 "INSERT OR IGNORE INTO user_schedule (user_id, enabled, interval_minutes) VALUES (?, ?, ?)",
                 (db_user_id, False, 60)  # Default: disabled, hourly
             )
-            self.conn.commit()
             
-            self.logger.info(f"User {username} added successfully with ID {db_user_id}")
+            # Initialize user preferences if not exists
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO user_preferences (user_id, preferred_language, enable_translation, max_news_items) VALUES (?, ?, ?, ?)",
+                (db_user_id, 'en', True, 5)  # Default: English, translation enabled, 5 items
+            )
+            
+            self.conn.commit()
             return db_user_id
         except Exception as e:
             self.logger.error(f"Error adding user: {str(e)}")
             self.conn.rollback()
             raise
             
-    def add_feed(self, feed_url: str, feed_name: str = None):
+    def add_feed(self, feed_url: str, feed_name: str = None) -> int:
         """Add a new RSS feed to the database."""
         try:
             # Verify feed URL
@@ -93,7 +105,7 @@ class NewsManager:
             
             if existing:
                 self.logger.info(f"Feed already exists: {feed_url}")
-                return -1  # Feed already exists
+                return existing[0]  # Return existing feed_id
             
             # Add the feed
             self.cursor.execute(
@@ -192,16 +204,18 @@ class NewsManager:
             self.cursor.execute("SELECT feed_id, feed_url FROM rss_feeds")
             feeds = self.cursor.fetchall()
             
+            total_added = 0
             for feed_id, feed_url in feeds:
-                self._fetch_feed_items(feed_id, feed_url)
+                added = self._fetch_feed_items(feed_id, feed_url)
+                total_added += added
                 
-            self.logger.info(f"Checked {len(feeds)} feeds for new content")
-            return True
+            self.logger.info(f"Checked {len(feeds)} feeds, added {total_added} new items")
+            return total_added
         except Exception as e:
             self.logger.error(f"Error checking feeds: {str(e)}")
-            return False
+            return 0
             
-    def _fetch_feed_items(self, feed_id: int, feed_url: str):
+    def _fetch_feed_items(self, feed_id: int, feed_url: str) -> int:
         """Fetch and store items from a feed."""
         try:
             feed = feedparser.parse(feed_url)
@@ -268,6 +282,10 @@ class NewsManager:
             if not db_user_id:
                 return []
             
+            # Get user preferences
+            preferences = self.get_user_preferences(user_id)
+            max_items = preferences.get('max_news_items', 5)
+            
             self.cursor.execute("""
                 SELECT ni.news_id, ni.title, ni.link, ni.description, ni.pub_date, rf.feed_name
                 FROM news_items ni
@@ -276,7 +294,8 @@ class NewsManager:
                 LEFT JOIN news_delivery nd ON ni.news_id = nd.news_id AND nd.user_id = ?
                 WHERE uf.user_id = ? AND nd.delivery_id IS NULL
                 ORDER BY ni.pub_date DESC
-            """, (db_user_id, db_user_id))
+                LIMIT ?
+            """, (db_user_id, db_user_id, max_items))
             
             columns = [description[0] for description in self.cursor.description]
             return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
@@ -324,7 +343,19 @@ class NewsManager:
                     'interval_minutes': result[1],
                     'last_delivery': result[2]
                 }
-            return None
+            
+            # If no schedule exists, create default
+            self.cursor.execute("""
+                INSERT INTO user_schedule (user_id, enabled, interval_minutes)
+                VALUES (?, ?, ?)
+            """, (db_user_id, False, 60))
+            self.conn.commit()
+            
+            return {
+                'enabled': False,
+                'interval_minutes': 60,
+                'last_delivery': None
+            }
         except Exception as e:
             self.logger.error(f"Error getting user schedule: {str(e)}")
             return None
@@ -335,6 +366,11 @@ class NewsManager:
             # Convert telegram user_id to database user_id
             db_user_id = self._get_db_user_id(user_id)
             if not db_user_id:
+                return False
+            
+            # Validate interval
+            if interval_minutes not in [30, 60, 180, 1440]:
+                self.logger.warning(f"Invalid interval: {interval_minutes}")
                 return False
             
             self.cursor.execute("""
@@ -366,14 +402,15 @@ class NewsManager:
             
             self.cursor.execute("""
                 UPDATE user_schedule
-                SET enabled = 1
+                SET enabled = 1,
+                    last_delivery = CURRENT_TIMESTAMP
                 WHERE user_id = ?
             """, (db_user_id,))
             
             if self.cursor.rowcount == 0:
                 self.cursor.execute("""
-                    INSERT INTO user_schedule (user_id, enabled, interval_minutes)
-                    VALUES (?, 1, 60)
+                    INSERT INTO user_schedule (user_id, enabled, interval_minutes, last_delivery)
+                    VALUES (?, 1, 60, CURRENT_TIMESTAMP)
                 """, (db_user_id,))
                 
             self.conn.commit()
@@ -441,9 +478,13 @@ class NewsManager:
             
             if result:
                 return result[0]
-                
-            # Not found at all - might need to add user first
-            return None
+            
+            # If still not found, try to add the user
+            try:
+                return self.add_user(telegram_user_id, f"user_{telegram_user_id}")
+            except Exception as e:
+                self.logger.error(f"Error adding user in _get_db_user_id: {str(e)}")
+                return None
         except Exception as e:
             self.logger.error(f"Error getting DB user ID: {str(e)}")
             return None
@@ -468,3 +509,122 @@ class NewsManager:
         """Close the database connection."""
         if self.conn:
             self.conn.close()
+
+    def get_user_language(self, user_id: str) -> str:
+        """Get user's preferred language."""
+        try:
+            db_user_id = self._get_db_user_id(user_id)
+            if not db_user_id:
+                return 'en'
+            
+            self.cursor.execute(
+                "SELECT preferred_language FROM user_preferences WHERE user_id = ?",
+                (db_user_id,)
+            )
+            result = self.cursor.fetchone()
+            return result[0] if result else 'en'
+        except Exception as e:
+            self.logger.error(f"Error getting user language: {str(e)}")
+            return 'en'
+
+    def set_user_language(self, user_id: str, language_code: str) -> bool:
+        """Set user's preferred language."""
+        try:
+            db_user_id = self._get_db_user_id(user_id)
+            if not db_user_id:
+                return False
+            
+            self.cursor.execute(
+                "UPDATE user_preferences SET preferred_language = ? WHERE user_id = ?",
+                (language_code, db_user_id)
+            )
+            
+            if self.cursor.rowcount == 0:
+                self.cursor.execute(
+                    "INSERT INTO user_preferences (user_id, preferred_language) VALUES (?, ?)",
+                    (db_user_id, language_code)
+                )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error setting user language: {str(e)}")
+            self.conn.rollback()
+            return False
+
+    def get_user_preferences(self, user_id: str) -> dict:
+        """Get all user preferences."""
+        try:
+            db_user_id = self._get_db_user_id(user_id)
+            if not db_user_id:
+                return {
+                    'preferred_language': 'en',
+                    'enable_translation': True,
+                    'max_news_items': 5
+                }
+            
+            self.cursor.execute(
+                "SELECT preferred_language, enable_translation, max_news_items FROM user_preferences WHERE user_id = ?",
+                (db_user_id,)
+            )
+            result = self.cursor.fetchone()
+            
+            if result:
+                return {
+                    'preferred_language': result[0],
+                    'enable_translation': bool(result[1]),
+                    'max_news_items': result[2]
+                }
+            return {
+                'preferred_language': 'en',
+                'enable_translation': True,
+                'max_news_items': 5
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting user preferences: {str(e)}")
+            return {
+                'preferred_language': 'en',
+                'enable_translation': True,
+                'max_news_items': 5
+            }
+
+    def update_user_preferences(self, user_id: str, preferences: dict) -> bool:
+        """Update user preferences."""
+        try:
+            db_user_id = self._get_db_user_id(user_id)
+            if not db_user_id:
+                return False
+            
+            self.cursor.execute(
+                """UPDATE user_preferences 
+                   SET preferred_language = ?,
+                       enable_translation = ?,
+                       max_news_items = ?
+                   WHERE user_id = ?""",
+                (
+                    preferences.get('preferred_language', 'en'),
+                    preferences.get('enable_translation', True),
+                    preferences.get('max_news_items', 5),
+                    db_user_id
+                )
+            )
+            
+            if self.cursor.rowcount == 0:
+                self.cursor.execute(
+                    """INSERT INTO user_preferences 
+                       (user_id, preferred_language, enable_translation, max_news_items)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        db_user_id,
+                        preferences.get('preferred_language', 'en'),
+                        preferences.get('enable_translation', True),
+                        preferences.get('max_news_items', 5)
+                    )
+                )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating user preferences: {str(e)}")
+            self.conn.rollback()
+            return False
