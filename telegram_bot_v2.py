@@ -41,6 +41,7 @@ if not TELEGRAM_BOT_TOKEN:
 CHOOSING_LANGUAGE, ENTERING_FEED_URL, CONFIRMING_REMOVAL, SETTING_SCHEDULE = range(4)
 
 # Dictionary of supported languages
+# Dictionary of supported languages
 SUPPORTED_LANGUAGES = {
     "en": "English",
     "es": "Spanish",
@@ -51,7 +52,8 @@ SUPPORTED_LANGUAGES = {
     "ru": "Russian",
     "zh": "Chinese",
     "ja": "Japanese",
-    "ar": "Arabic"
+    "ar": "Arabic",
+    "fa": "Persian"  # Added Persian language support
 }
 
 # Command handlers
@@ -115,7 +117,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     # Get user's feeds
-    feeds = news_manager.get_feeds(user_id)
+    feeds = news_manager.get_user_feeds(user_id)
     
     # Get user's schedule
     schedule = news_manager.get_user_schedule(user_id)
