@@ -1,25 +1,42 @@
-# News Management System
+# News RSS Bot
 
-A powerful news management system that aggregates, processes, and delivers news from various RSS feeds to users through multiple platforms (currently supporting Telegram).
+A Telegram bot that aggregates, processes, and delivers news from various RSS feeds with advanced features like translation and summarization.
 
 ## Features
 
-- **Multi-platform Support**: Easily integrate with different platforms (Telegram support included)
-- **RSS Feed Management**: Add, remove, and manage multiple RSS feeds
-- **Automatic News Delivery**: Schedule news delivery at custom intervals
-- **Language Support**: 
+- **RSS Feed Management**:
+  - Add and remove RSS feeds
+  - List subscribed feeds with IDs
+  - Automatic feed updates
+  - Feed status tracking
+
+- **News Delivery**:
+  - Automatic news delivery on schedule
+  - Manual news retrieval
+  - Customizable delivery intervals
+  - News item tracking to avoid duplicates
+
+- **Language Support**:
   - Automatic language detection
   - News translation to preferred language
-  - Support for multiple languages (English, Spanish, French, German, Italian, Portuguese, Russian, Chinese, Japanese, Persian)
-- **News Processing**:
-  - Automatic news summarization
-  - HTML content cleaning
-  - Duplicate detection
-- **User Management**:
-  - User registration and preferences
-  - Custom delivery schedules
-  - Feed subscription management
-  - Translation preferences
+  - Support for multiple languages:
+    - English (en)
+    - Spanish (es)
+    - French (fr)
+    - German (de)
+    - Italian (it)
+    - Portuguese (pt)
+    - Russian (ru)
+    - Chinese (zh)
+    - Japanese (ja)
+    - Arabic (ar)
+    - Persian (fa)
+
+- **User Preferences**:
+  - Customizable language settings
+  - Translation toggle
+  - Maximum news items per delivery
+  - Delivery schedule settings
 
 ## Requirements
 
@@ -31,13 +48,16 @@ A powerful news management system that aggregates, processes, and delivers news 
   - beautifulsoup4
   - requests
   - python-dotenv
+  - langchain
+  - langchain-openai
+  - langchain-core
 
 ## Installation
 
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd news-management-system
+cd news-rss-bot
 ```
 
 2. Create a virtual environment:
@@ -57,27 +77,20 @@ Create a `.env` file in the project root with the following variables:
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 
-# LLM API Configuration
-LLM_API_KEY=your_llm_api_key_here
-LLM_API_URL=https://api.example.com/v1  # Replace with actual LLM API URL if needed
+# OpenAI Configuration
+OPENAI_API_KEY=your_openai_api_key_here
 ```
-
-Make sure to:
-- Replace `your_telegram_bot_token_here` with your actual Telegram bot token
-- Replace `your_llm_api_key_here` with your actual LLM API key
-- Replace the LLM API URL with the actual endpoint if needed
-- Never commit the `.env` file to version control
 
 ## Project Structure
 
 ```
-news-management-system/
-├── telegram_bot_v2.py    # Telegram bot implementation
-├── news_manager.py       # Core news management functionality
-├── llm_manager.py        # Language and content processing
+news-rss-bot/
+├── telegram_bot_v2.py    # Main Telegram bot implementation
+├── news_manager.py       # Database and RSS feed management
+├── llm_manager.py        # Language model operations
 ├── schema.sql           # Database schema
 ├── requirements.txt     # Project dependencies
-├── .env                 # Environment variables (not in version control)
+├── .env                 # Environment variables
 └── README.md           # This file
 ```
 
@@ -89,12 +102,12 @@ news-management-system/
 - `/help` - Show help message
 - `/status` - Show current settings
 - `/addfeed <url>` - Add a new RSS feed
-- `/listfeeds` - Show subscribed feeds
-- `/removefeed <url>` - Remove a feed
+- `/listfeeds` - Show subscribed feeds with IDs
+- `/removefeed <feed_id>` - Remove a feed using its ID
 - `/settings` - Configure news delivery settings
 - `/schedule` - Set news delivery schedule
 - `/language` - Change preferred language
-- `/getnews` - Get latest news
+- `/getnews` - Get latest news manually
 
 ### Settings
 
@@ -102,16 +115,17 @@ The bot provides several customization options:
 
 1. **Auto Delivery**:
    - Enable/disable automatic news delivery
-   - Set delivery interval (15min to 8 hours)
+   - Set delivery interval (30min, 1h, 3h, 24h)
 
 2. **Language Preferences**:
    - Choose preferred language
    - Enable/disable translation
+   - Set maximum news items per delivery
 
 3. **Feed Management**:
    - Add multiple RSS feeds
-   - Remove unwanted feeds
-   - View subscribed feeds
+   - Remove feeds using their IDs
+   - View subscribed feeds and their status
 
 ## Database Schema
 
@@ -152,4 +166,5 @@ For support, please open an issue in the GitHub repository or contact the mainta
 
 - python-telegram-bot library
 - feedparser for RSS parsing
-- BeautifulSoup for HTML processing 
+- BeautifulSoup for HTML processing
+- LangChain for language model operations 

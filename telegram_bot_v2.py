@@ -217,16 +217,25 @@ async def list_feeds_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
-    message = "📋 *Your Subscribed Feeds:*\n\n"
+    # Create a formatted message without markdown to avoid parsing errors
+    message = "📋 Your Subscribed Feeds:\n\n"
     for i, feed in enumerate(feeds, 1):
         last_updated = feed['last_updated'] if feed['last_updated'] else "Never"
-        message += f"{i}. *{feed['feed_name']}*\n"
-        message += f"   URL: {feed['feed_url']}\n"
-        message += f"   Last updated: {last_updated}\n\n"
+        message += f"ID: {feed['feed_id']}\n"
+        message += f"Name: {feed['feed_name']}\n"
+        message += f"URL: {feed['feed_url']}\n"
+        message += f"Last updated: {last_updated}\n\n"
     
-    message += "To remove a feed, use /removefeed <feed_id>"
+    message += "To remove a feed, use /removefeed <feed_id>\n"
+    message += "Example: /removefeed 1"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # Split message if it's too long (Telegram has a 4096 character limit)
+    if len(message) > 4000:
+        parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
+        for part in parts:
+            await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(message)
 
 async def remove_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove a subscribed feed."""
@@ -244,21 +253,22 @@ async def remove_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Feed ID must be a number.")
         return
     
-    # Check if user is subscribed to this feed
-    news_manager.cursor.execute(
-        "SELECT * FROM user_feeds WHERE user_id = ? AND feed_id = ?", 
-        (user_id, feed_id)
-    )
-    if not news_manager.cursor.fetchone():
+    # Get user's feeds to verify the feed_id exists
+    feeds = news_manager.get_user_feeds(user_id)
+    feed_ids = [feed['feed_id'] for feed in feeds]
+    
+    if feed_id not in feed_ids:
         await update.message.reply_text(
-            "You are not subscribed to this feed or the feed ID is invalid."
+            "❌ Invalid feed ID. Please use /listfeeds to see your subscribed feeds and their IDs."
         )
         return
     
     # Unsubscribe user from feed
     if news_manager.unsubscribe_user_from_feed(user_id, feed_id):
+        # Get the feed name for the success message
+        feed_name = next((feed['feed_name'] for feed in feeds if feed['feed_id'] == feed_id), "Unknown Feed")
         await update.message.reply_text(
-            "✅ Successfully unsubscribed from the feed."
+            f"✅ Successfully unsubscribed from feed: {feed_name}"
         )
     else:
         await update.message.reply_text(
