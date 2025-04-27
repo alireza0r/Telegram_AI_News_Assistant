@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 import langdetect
 import time
 from telegram.error import NetworkError, RetryAfter
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -704,6 +705,102 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Sorry, an error occurred while processing your request. Please try again later."
         )
 
+async def check_and_deliver_news(context: ContextTypes.DEFAULT_TYPE):
+    """Check for and deliver news to users based on their schedules."""
+    try:
+        # Get all users with enabled schedules
+        news_manager.cursor.execute("""
+            SELECT us.user_id, us.interval_minutes, us.last_delivery, u.username
+            FROM user_schedule us
+            JOIN users u ON us.user_id = u.user_id
+            WHERE us.enabled = 1
+        """)
+        users = news_manager.cursor.fetchall()
+        
+        for user_id, interval_minutes, last_delivery, username in users:
+            # Check if it's time to deliver news
+            if last_delivery:
+                last_delivery_time = datetime.strptime(last_delivery, '%Y-%m-%d %H:%M:%S')
+                next_delivery_time = last_delivery_time + timedelta(minutes=interval_minutes)
+                if datetime.now() < next_delivery_time:
+                    continue
+            
+            # Get undelivered news for user
+            news_items = news_manager.get_undelivered_news(str(user_id))
+            
+            if not news_items:
+                continue
+            
+            # Limit to 5 news items per interval
+            news_items = news_items[:5]
+            
+            # Get user's language preference
+            user_language = get_user_language(str(user_id))
+            
+            # Process and send each news item with delay
+            for item in news_items:
+                # Detect source language
+                source_language = detect_language(item['description'])
+                
+                # Prepare news message
+                news_message = f"📰 *{item['title']}*\n\n"
+                
+                # Check if translation is needed
+                if source_language != user_language:
+                    try:
+                        # Translate using LLM
+                        translated_description = await llm_manager.translate_text(
+                            item['description'], 
+                            source_language, 
+                            user_language
+                        )
+                        news_message += f"{translated_description}\n\n"
+                        news_message += f"🌐 *Translated from {SUPPORTED_LANGUAGES.get(source_language, source_language)}*\n\n"
+                    except Exception as e:
+                        logger.error(f"Translation error: {e}")
+                        news_message += f"{item['description']}\n\n"
+                        news_message += "⚠️ *Translation failed*\n\n"
+                else:
+                    news_message += f"{item['description']}\n\n"
+                
+                news_message += f"Source: {item['feed_name']}\n"
+                news_message += f"Link: {item['link']}"
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=news_message,
+                        parse_mode='Markdown'
+                    )
+                    # Add 5 second delay between messages
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"Error sending message to user {user_id}: {e}")
+                    # If we hit a rate limit, wait longer before continuing
+                    if "Too Many Requests" in str(e):
+                        await asyncio.sleep(30)
+                    continue
+                
+                # Mark as delivered
+                news_manager.mark_news_delivered(str(user_id), item['news_id'])
+            
+            # Update last delivery time
+            news_manager.update_last_delivery(str(user_id))
+            
+    except Exception as e:
+        logger.error(f"Error in check_and_deliver_news: {e}")
+
+def start_scheduler(application: Application):
+    """Start the background scheduler."""
+    async def run_scheduler(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await check_and_deliver_news(context)
+        except Exception as e:
+            logger.error(f"Error in scheduler: {e}")
+    
+    # Create a new task in the application's event loop
+    application.job_queue.run_repeating(run_scheduler, interval=300, first=0)  # Run every 5 minutes
+
 def main():
     """Start the bot."""
     # Create the Application and pass it your bot's token
@@ -728,7 +825,8 @@ def main():
         states={
             CHOOSING_LANGUAGE: [CallbackQueryHandler(button_callback, pattern=r"^lang_")]
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        per_message=False  # Set to False since we have CommandHandler entry points
     )
     application.add_handler(language_conv_handler)
     
@@ -737,26 +835,19 @@ def main():
         states={
             SETTING_SCHEDULE: [CallbackQueryHandler(button_callback, pattern=r"^schedule_")]
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        per_message=False  # Set to False since we have CommandHandler entry points
     )
     application.add_handler(schedule_conv_handler)
     
     # Add general callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
-
-    # Start the Bot with retry logic
-    while True:
-        try:
-            logger.info("Starting bot...")
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
-        except NetworkError as e:
-            logger.error(f"Network error: {e}")
-            logger.info("Retrying in 5 seconds...")
-            time.sleep(5)
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            logger.info("Retrying in 5 seconds...")
-            time.sleep(5)
+    
+    # Start the scheduler
+    start_scheduler(application)
+    
+    # Start the bot
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()

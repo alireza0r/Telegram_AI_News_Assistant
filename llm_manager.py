@@ -36,7 +36,7 @@ class LLMManager:
         # Initialize the language model
         self.llm = ChatOpenAI(
             temperature=0.3,
-            model_name="gpt-3.5-turbo",
+            model_name="gpt-4o-mini",
             openai_api_key=self.api_key
         )
         
@@ -45,8 +45,8 @@ class LLMManager:
         
         # Initialize prompt templates
         self.translation_prompt = ChatPromptTemplate.from_template(
-            "Translate the following text from {source_lang} to {target_lang}. "
-            "Maintain the original meaning and tone:\n\n{text}"
+            "Translate the following text from {source_lang} to {target_lang} conceptually. "
+            "\n\n{text}"
         )
         
         self.summarization_prompt = ChatPromptTemplate.from_template(
