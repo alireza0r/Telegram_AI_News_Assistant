@@ -62,5 +62,17 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     preferred_language TEXT DEFAULT 'en',
     enable_translation BOOLEAN DEFAULT TRUE,
     max_news_items INTEGER DEFAULT 5,
+    enable_voice BOOLEAN DEFAULT TRUE,
+    voice_language TEXT DEFAULT 'auto',
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Voice files table to store synthesized voice files
+CREATE TABLE IF NOT EXISTS voice_files (
+    voice_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    news_id INTEGER,
+    language TEXT NOT NULL,
+    file_path TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (news_id) REFERENCES news_items(news_id) ON DELETE CASCADE
 ); 

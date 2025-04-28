@@ -1,5 +1,5 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaAudio
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -379,22 +379,41 @@ async def get_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 news_message += f"{translated_description}\n\n"
                 news_message += f"🌐 *Translated from {SUPPORTED_LANGUAGES.get(source_language, source_language)}*\n\n"
+                
+                # Generate voice for translated text
+                voice_file = await news_manager.get_voice_file(item['news_id'], translated_description, user_language)
             except Exception as e:
                 logger.error(f"Translation error: {e}")
                 news_message += f"{item['description']}\n\n"
                 news_message += "⚠️ *Translation failed*\n\n"
+                # Generate voice for original text
+                voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
         else:
             news_message += f"{item['description']}\n\n"
+            # Generate voice for original text
+            voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
         
         news_message += f"Source: {item['feed_name']}\n"
         news_message += f"Link: {item['link']}"
         
-        try:
+        # Send message with voice if available
+        if voice_file and os.path.exists(voice_file):
+            with open(voice_file, 'rb') as voice:
+                # Create media group with text and voice
+                media_group = [
+                    InputMediaAudio(
+                        media=voice,
+                        caption=news_message,
+                        parse_mode='Markdown'
+                    )
+                ]
+                await context.bot.send_media_group(
+                    chat_id=user_id,
+                    media=media_group
+                )
+        else:
+            # If no voice file, just send text
             await update.message.reply_text(news_message, parse_mode='Markdown')
-        except Exception as e:
-            # If markdown parsing fails, send without markdown
-            logger.error(f"Error sending message with markdown: {e}")
-            await update.message.reply_text(news_message)
         
         # Mark as delivered
         news_manager.mark_news_delivered(user_id, item['news_id'])
@@ -410,7 +429,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Configure news delivery settings."""
     user_id = str(update.effective_user.id)
     preferences = news_manager.get_user_preferences(user_id)
-    
+    print("preferences")
     # Create keyboard for settings options
     keyboard = [
         [
@@ -420,20 +439,32 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("📰 Max News Items", callback_data="settings_max_items"),
             InlineKeyboardButton("⏰ Schedule", callback_data="settings_schedule")
+        ],
+        [
+            InlineKeyboardButton("🎤 Voice Messages", callback_data="settings_voice"),
+            InlineKeyboardButton("🗣 Voice Language", callback_data="settings_voice_lang")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    print(2)
     # Get current settings
     schedule = news_manager.get_user_schedule(user_id)
+    print(3)
     translation_status = "Enabled" if preferences['enable_translation'] else "Disabled"
+    print(4)
+    voice_status = "Enabled" if preferences['enable_voice'] else "Disabled"
+    print(5)
+    voice_lang = "Auto (Source Language)" if preferences['voice_language'] == 'auto' else SUPPORTED_LANGUAGES.get(preferences['voice_language'], preferences['voice_language'])
+    print(6)
     max_items = preferences['max_news_items']
-    
+    print(7)
     message = (
         "⚙️ *News Settings*\n\n"
         f"🌐 *Language:* {SUPPORTED_LANGUAGES.get(preferences['preferred_language'], 'English')}\n"
         f"📝 *Translation:* {translation_status}\n"
         f"📰 *Max News Items:* {max_items}\n"
+        f"🎤 *Voice Messages:* {voice_status}\n"
+        f"🗣 *Voice Language:* {voice_lang}\n"
         f"⏰ *Schedule:* {'Enabled' if schedule and schedule['enabled'] else 'Disabled'}\n"
         f"  • Interval: Every {schedule['interval_minutes'] if schedule else 60} minutes\n\n"
         "Select an option to update your settings:"
@@ -645,6 +676,54 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "❌ Failed to update maximum news items. Please try again."
             )
+    
+    elif data == "settings_voice":
+        # Toggle voice messages
+        preferences = news_manager.get_user_preferences(user_id)
+        new_status = not preferences['enable_voice']
+        if news_manager.set_voice_enabled(user_id, new_status):
+            status_text = "enabled" if new_status else "disabled"
+            await query.edit_message_text(
+                f"✅ Voice messages {status_text}.\n"
+                "You will now receive voice versions of news articles."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to update voice settings. Please try again."
+            )
+    
+    elif data == "settings_voice_lang":
+        # Create keyboard for voice language options
+        keyboard = [
+            [InlineKeyboardButton("Auto (Source Language)", callback_data="voice_lang_auto")]
+        ]
+        
+        # Add supported languages
+        for code, name in SUPPORTED_LANGUAGES.items():
+            keyboard.append([InlineKeyboardButton(name, callback_data=f"voice_lang_{code}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🗣 Select your preferred voice language:\n"
+            "• Auto: Uses the article's original language when available\n"
+            "• Specific language: Always uses the selected language",
+            reply_markup=reply_markup
+        )
+    
+    elif data.startswith("voice_lang_"):
+        # Handle voice language selection
+        lang_code = data.split("_")[2]
+        if news_manager.set_voice_language(user_id, lang_code):
+            lang_name = "Auto (Source Language)" if lang_code == "auto" else SUPPORTED_LANGUAGES.get(lang_code, lang_code)
+            await query.edit_message_text(
+                f"✅ Voice language set to {lang_name}.\n"
+                "Your news will now be read in this language."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to update voice language. Please try again."
+            )
 
 # Helper functions
 def extract_feed_name(url: str) -> str:
@@ -734,61 +813,59 @@ async def check_and_deliver_news(context: ContextTypes.DEFAULT_TYPE):
             # Limit to 5 news items per interval
             news_items = news_items[:5]
             
-            # Get user's language preference
-            user_language = get_user_language(str(user_id))
+            # Get user's preferences
+            preferences = news_manager.get_user_preferences(str(user_id))
+            user_language = preferences['preferred_language']
+            enable_voice = preferences['enable_voice']
+            voice_language = preferences['voice_language']
             
-            # Process and send each news item with delay
-            for item in news_items:
-                # Detect source language
-                source_language = detect_language(item['description'])
+            # Send each news item
+            for news in news_items:
+                # Format news message
+                message = (
+                    f"📰 *{news['title']}*\n\n"
+                    f"{news['description']}\n\n"
+                    f"Source: {news['feed_name']}\n"
+                    f"Published: {news['pub_date']}\n"
+                    f"[Read more]({news['link']})"
+                )
                 
-                # Prepare news message
-                news_message = f"📰 *{item['title']}*\n\n"
+                # Send text message
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
                 
-                # Check if translation is needed
-                if source_language != user_language:
-                    try:
-                        # Translate using LLM
-                        translated_description = await llm_manager.translate_text(
-                            item['description'], 
-                            source_language, 
-                            user_language
-                        )
-                        news_message += f"{translated_description}\n\n"
-                        news_message += f"🌐 *Translated from {SUPPORTED_LANGUAGES.get(source_language, source_language)}*\n\n"
-                    except Exception as e:
-                        logger.error(f"Translation error: {e}")
-                        news_message += f"{item['description']}\n\n"
-                        news_message += "⚠️ *Translation failed*\n\n"
-                else:
-                    news_message += f"{item['description']}\n\n"
+                # Generate and send voice message if enabled
+                print("enable_voice")
+                print(enable_voice)
+                if enable_voice:
+                    print("enable_voice true")
+                    # Use specified voice language or auto-detect
+                    voice_lang = voice_language if voice_language != 'auto' else user_language
+                    print("voice_lang")
+                    print(voice_lang)
+                    # Combine title and description for voice
+                    voice_text = f"{news['title']}. {news['description']}"
+                    voice_file = news_manager.get_voice_file(news['news_id'], voice_text, voice_lang)
+                    if voice_file and os.path.exists(voice_file):
+                        with open(voice_file, 'rb') as voice:
+                            await context.bot.send_voice(
+                                chat_id=user_id,
+                                voice=voice,
+                                caption=f"🎧 Voice version of: {news['title']}"
+                            )
                 
-                news_message += f"Source: {item['feed_name']}\n"
-                news_message += f"Link: {item['link']}"
-                
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=news_message,
-                        parse_mode='Markdown'
-                    )
-                    # Add 5 second delay between messages
-                    await asyncio.sleep(5)
-                except Exception as e:
-                    logger.error(f"Error sending message to user {user_id}: {e}")
-                    # If we hit a rate limit, wait longer before continuing
-                    if "Too Many Requests" in str(e):
-                        await asyncio.sleep(30)
-                    continue
-                
-                # Mark as delivered
-                news_manager.mark_news_delivered(str(user_id), item['news_id'])
+                # Mark news as delivered
+                news_manager.mark_news_delivered(str(user_id), news['news_id'])
             
             # Update last delivery time
             news_manager.update_last_delivery(str(user_id))
             
     except Exception as e:
-        logger.error(f"Error in check_and_deliver_news: {e}")
+        logging.error(f"Error in check_and_deliver_news: {str(e)}")
 
 def start_scheduler(application: Application):
     """Start the background scheduler."""

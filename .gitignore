@@ -35,3 +35,5 @@ var/
 
 # Logs
 *.log
+
+*.mp3

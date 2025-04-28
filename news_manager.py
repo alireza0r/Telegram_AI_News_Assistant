@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import langdetect
+from edge_tts_lib import EdgeTTS
 
 # Load environment variables
 load_dotenv()
@@ -26,6 +27,14 @@ class NewsManager:
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
         self._init_db()
+        
+        # Create voice files directory if it doesn't exist
+        self.voice_dir = "voice_files"
+        if not os.path.exists(self.voice_dir):
+            os.makedirs(self.voice_dir)
+            
+        # Initialize EdgeTTS
+        self.tts = EdgeTTS()
         
     def _init_db(self):
         """Initialize the SQLite database."""
@@ -505,6 +514,70 @@ class NewsManager:
         
         return name
             
+    async def get_voice_file(self, news_id: int, text: str, language: str) -> str:
+        """Get or generate voice file for a news item."""
+        try:
+            print("Getting voice file for news_id:", news_id)
+            print("Text length:", len(text))
+            print("Language:", language)
+            
+            # Check if voice file already exists
+            self.cursor.execute("""
+                SELECT file_path FROM voice_files 
+                WHERE news_id = ? AND language = ?
+            """, (news_id, language))
+            
+            result = self.cursor.fetchone()
+            if result:
+                print("Found existing voice file:", result[0])
+                return result[0]
+            
+            # Generate voice file
+            voice_file = os.path.join(self.voice_dir, f"news_{news_id}_{language}.mp3")
+            print("Generating voice file at:", voice_file)
+            
+            # Get appropriate voice for the language
+            voice = self._get_voice_for_language(language)
+            print("Using voice:", voice)
+            
+            # Synthesize voice using async
+            success = await self.tts.synthesize_async(text, voice_file, voice=voice)
+            if success:
+                print("Voice synthesis successful")
+                # Store voice file info in database
+                self.cursor.execute("""
+                    INSERT INTO voice_files (news_id, language, file_path)
+                    VALUES (?, ?, ?)
+                """, (news_id, language, voice_file))
+                self.conn.commit()
+                return voice_file
+            print("Voice synthesis failed")
+            return None
+            
+        except Exception as e:
+            print("Error in get_voice_file:", str(e))
+            self.logger.error(f"Error getting/generating voice file: {str(e)}")
+            return None
+            
+    def _get_voice_for_language(self, language: str) -> str:
+        """Get appropriate voice for the given language."""
+        # Map of language codes to EdgeTTS voices
+        # https://gist.github.com/BettyJJ/17cbaa1de96235a7f5773b8690a20462
+        voice_map = {
+            'en': 'en-US-AriaNeural',  # English
+            'es': 'es-ES-AlvaroNeural',  # Spanish
+            'fr': 'fr-FR-DeniseNeural',  # French
+            'de': 'de-DE-KatjaNeural',  # German
+            'it': 'it-IT-ElsaNeural',  # Italian
+            'pt': 'pt-BR-FranciscaNeural',  # Portuguese
+            'ru': 'ru-RU-SvetlanaNeural',  # Russian
+            'zh': 'zh-CN-XiaoxiaoNeural',  # Chinese
+            'ja': 'ja-JP-NanamiNeural',  # Japanese
+            'ar': 'ar-SA-ZariyahNeural',  # Arabic
+            'fa': 'fa-IR-FaridNeural',  # Persian
+        }
+        return voice_map.get(language, 'en-US-AriaNeural')  # Default to English if language not supported
+
     def close(self):
         """Close the database connection."""
         if self.conn:
@@ -553,39 +626,47 @@ class NewsManager:
             return False
 
     def get_user_preferences(self, user_id: str) -> dict:
-        """Get all user preferences."""
+        """Get user preferences."""
         try:
             db_user_id = self._get_db_user_id(user_id)
             if not db_user_id:
                 return {
                     'preferred_language': 'en',
                     'enable_translation': True,
-                    'max_news_items': 5
+                    'max_news_items': 5,
+                    'enable_voice': True,
+                    'voice_language': 'auto'
                 }
             
-            self.cursor.execute(
-                "SELECT preferred_language, enable_translation, max_news_items FROM user_preferences WHERE user_id = ?",
-                (db_user_id,)
-            )
+            self.cursor.execute("""
+                SELECT preferred_language, enable_translation, max_news_items, enable_voice, voice_language
+                FROM user_preferences WHERE user_id = ?
+            """, (db_user_id,))
             result = self.cursor.fetchone()
             
             if result:
                 return {
                     'preferred_language': result[0],
                     'enable_translation': bool(result[1]),
-                    'max_news_items': result[2]
+                    'max_news_items': result[2],
+                    'enable_voice': bool(result[3]),
+                    'voice_language': result[4] if result[4] else 'auto'
                 }
             return {
                 'preferred_language': 'en',
                 'enable_translation': True,
-                'max_news_items': 5
+                'max_news_items': 5,
+                'enable_voice': True,
+                'voice_language': 'auto'
             }
         except Exception as e:
             self.logger.error(f"Error getting user preferences: {str(e)}")
             return {
                 'preferred_language': 'en',
                 'enable_translation': True,
-                'max_news_items': 5
+                'max_news_items': 5,
+                'enable_voice': True,
+                'voice_language': 'auto'
             }
 
     def update_user_preferences(self, user_id: str, preferences: dict) -> bool:
@@ -595,36 +676,60 @@ class NewsManager:
             if not db_user_id:
                 return False
             
-            self.cursor.execute(
-                """UPDATE user_preferences 
-                   SET preferred_language = ?,
-                       enable_translation = ?,
-                       max_news_items = ?
-                   WHERE user_id = ?""",
-                (
+            self.cursor.execute("""
+                UPDATE user_preferences 
+                SET preferred_language = ?,
+                    enable_translation = ?,
+                    max_news_items = ?,
+                    enable_voice = ?,
+                    voice_language = ?
+                WHERE user_id = ?
+            """, (
+                preferences.get('preferred_language', 'en'),
+                preferences.get('enable_translation', True),
+                preferences.get('max_news_items', 5),
+                preferences.get('enable_voice', True),
+                preferences.get('voice_language', 'auto'),
+                db_user_id
+            ))
+            
+            if self.cursor.rowcount == 0:
+                self.cursor.execute("""
+                    INSERT INTO user_preferences 
+                    (user_id, preferred_language, enable_translation, max_news_items, enable_voice, voice_language)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    db_user_id,
                     preferences.get('preferred_language', 'en'),
                     preferences.get('enable_translation', True),
                     preferences.get('max_news_items', 5),
-                    db_user_id
-                )
-            )
-            
-            if self.cursor.rowcount == 0:
-                self.cursor.execute(
-                    """INSERT INTO user_preferences 
-                       (user_id, preferred_language, enable_translation, max_news_items)
-                       VALUES (?, ?, ?, ?)""",
-                    (
-                        db_user_id,
-                        preferences.get('preferred_language', 'en'),
-                        preferences.get('enable_translation', True),
-                        preferences.get('max_news_items', 5)
-                    )
-                )
+                    preferences.get('enable_voice', True),
+                    preferences.get('voice_language', 'auto')
+                ))
             
             self.conn.commit()
             return True
         except Exception as e:
             self.logger.error(f"Error updating user preferences: {str(e)}")
             self.conn.rollback()
+            return False
+
+    def set_voice_enabled(self, user_id: str, enabled: bool) -> bool:
+        """Enable or disable voice messages for a user."""
+        try:
+            preferences = self.get_user_preferences(user_id)
+            preferences['enable_voice'] = enabled
+            return self.update_user_preferences(user_id, preferences)
+        except Exception as e:
+            self.logger.error(f"Error setting voice enabled: {str(e)}")
+            return False
+
+    def set_voice_language(self, user_id: str, language: str) -> bool:
+        """Set voice language preference for a user."""
+        try:
+            preferences = self.get_user_preferences(user_id)
+            preferences['voice_language'] = language
+            return self.update_user_preferences(user_id, preferences)
+        except Exception as e:
+            self.logger.error(f"Error setting voice language: {str(e)}")
             return False
