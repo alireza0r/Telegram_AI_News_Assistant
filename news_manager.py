@@ -632,9 +632,9 @@ class NewsManager:
             if not db_user_id:
                 return {
                     'preferred_language': 'en',
-                    'enable_translation': True,
+                    'enable_translation': False,
                     'max_news_items': 5,
-                    'enable_voice': True,
+                    'enable_voice': False,
                     'voice_language': 'auto'
                 }
             
@@ -654,18 +654,18 @@ class NewsManager:
                 }
             return {
                 'preferred_language': 'en',
-                'enable_translation': True,
+                'enable_translation': False,
                 'max_news_items': 5,
-                'enable_voice': True,
+                'enable_voice': False,
                 'voice_language': 'auto'
             }
         except Exception as e:
             self.logger.error(f"Error getting user preferences: {str(e)}")
             return {
                 'preferred_language': 'en',
-                'enable_translation': True,
+                'enable_translation': False,
                 'max_news_items': 5,
-                'enable_voice': True,
+                'enable_voice': False,
                 'voice_language': 'auto'
             }
 

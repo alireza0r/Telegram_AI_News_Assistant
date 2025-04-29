@@ -360,6 +360,9 @@ async def get_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("🔍 Fetching your latest news...")
     
+    voice_status = news_manager.get_user_preferences(user_id)["enable_voice"]
+    translation_status = news_manager.get_user_preferences(user_id)["enable_translation"]
+
     # Process and send each news item
     for item in news_items:
         # Detect source language
@@ -369,7 +372,7 @@ async def get_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news_message = f"📰 *{item['title']}*\n\n"
         
         # Check if translation is needed
-        if source_language != user_language:
+        if translation_status and source_language != user_language:
             try:
                 # Translate using LLM
                 translated_description = await llm_manager.translate_text(
@@ -381,23 +384,26 @@ async def get_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 news_message += f"🌐 *Translated from {SUPPORTED_LANGUAGES.get(source_language, source_language)}*\n\n"
                 
                 # Generate voice for translated text
-                voice_file = await news_manager.get_voice_file(item['news_id'], translated_description, user_language)
+                if voice_status:
+                    voice_file = await news_manager.get_voice_file(item['news_id'], translated_description, user_language)
             except Exception as e:
                 logger.error(f"Translation error: {e}")
                 news_message += f"{item['description']}\n\n"
                 news_message += "⚠️ *Translation failed*\n\n"
                 # Generate voice for original text
-                voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
+                if voice_status:
+                    voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
         else:
             news_message += f"{item['description']}\n\n"
             # Generate voice for original text
-            voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
+            if voice_status:
+                voice_file = await news_manager.get_voice_file(item['news_id'], item['description'], source_language)
         
         news_message += f"Source: {item['feed_name']}\n"
         news_message += f"Link: {item['link']}"
         
         # Send message with voice if available
-        if voice_file and os.path.exists(voice_file):
+        if voice_status and voice_file and os.path.exists(voice_file):
             with open(voice_file, 'rb') as voice:
                 # Create media group with text and voice
                 media_group = [
@@ -442,7 +448,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🎤 Voice Messages", callback_data="settings_voice"),
-            InlineKeyboardButton("🗣 Voice Language", callback_data="settings_voice_lang")
+            InlineKeyboardButton("🗣 Voice Language", callback_data="settings_voicelang")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -576,6 +582,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith("settings_"):
         # Handle settings options
+        print("Settings")
+        print(data)
+        print("*************")
         setting = data.split("_")[1]
         
         if setting == "language":
@@ -661,6 +670,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
             return SETTING_SCHEDULE
+        
+        elif setting == "voice":
+            print("voice messages")
+            # Toggle voice messages
+            preferences = news_manager.get_user_preferences(user_id)
+            new_status = not preferences['enable_voice']
+            print("new_status")
+            print(new_status)
+            if news_manager.set_voice_enabled(user_id, new_status):
+                status_text = "enabled" if new_status else "disabled"
+                print("status_text")
+                print(status_text)
+                await query.edit_message_text(
+                    f"✅ Voice messages {status_text}.\n"
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to update voice settings. Please try again."
+                )
+        
+        elif setting == "voicelang":
+            # Create keyboard for voice language options
+            keyboard = [
+                [InlineKeyboardButton("Auto (Source Language)", callback_data="voice_lang_auto")]
+            ]
+            
+            # Add supported languages
+            for code, name in SUPPORTED_LANGUAGES.items():
+                keyboard.append([InlineKeyboardButton(name, callback_data=f"voice_lang_{code}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "🗣 Select your preferred voice language:\n"
+                "• Auto: Uses the article's original language when available\n"
+                "• Specific language: Always uses the selected language",
+                reply_markup=reply_markup
+            )
     
     elif data.startswith("max_items_"):
         max_items = int(data.split("_")[2])
@@ -676,40 +723,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "❌ Failed to update maximum news items. Please try again."
             )
-    
-    elif data == "settings_voice":
-        # Toggle voice messages
-        preferences = news_manager.get_user_preferences(user_id)
-        new_status = not preferences['enable_voice']
-        if news_manager.set_voice_enabled(user_id, new_status):
-            status_text = "enabled" if new_status else "disabled"
-            await query.edit_message_text(
-                f"✅ Voice messages {status_text}.\n"
-                "You will now receive voice versions of news articles."
-            )
-        else:
-            await query.edit_message_text(
-                "❌ Failed to update voice settings. Please try again."
-            )
-    
-    elif data == "settings_voice_lang":
-        # Create keyboard for voice language options
-        keyboard = [
-            [InlineKeyboardButton("Auto (Source Language)", callback_data="voice_lang_auto")]
-        ]
-        
-        # Add supported languages
-        for code, name in SUPPORTED_LANGUAGES.items():
-            keyboard.append([InlineKeyboardButton(name, callback_data=f"voice_lang_{code}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🗣 Select your preferred voice language:\n"
-            "• Auto: Uses the article's original language when available\n"
-            "• Specific language: Always uses the selected language",
-            reply_markup=reply_markup
-        )
     
     elif data.startswith("voice_lang_"):
         # Handle voice language selection
